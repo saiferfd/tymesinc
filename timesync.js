@@ -10,7 +10,7 @@
     if (isWindows && req) {
         try {
             node_cp = req('child_process');
-            node_http = req('http'); // Використовуємо вбудований HTTP модуль Lampa
+            node_http = req('http');
         } catch (e) {}
     }
 
@@ -20,7 +20,7 @@
     }
 
     // --- НАЛАШТУВАННЯ ---
-    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe'; // Перевірте шлях до плеєра!
+    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe';
     var PROXY_PORT = 8080;
     var MPC_PORT = 13579;
     var MAX_FAILS = 15;
@@ -30,7 +30,6 @@
     var failCount = 0;
     var internalServer = null;
 
-    // --- ВБУДОВАНИЙ ПРОКСІ (ПРАЦЮЄ ВСЕРЕДИНІ LAMPA БЕЗ ЗОВНІШНІХ ФАЙЛІВ) ---
     function ensureInternalProxy() {
         if (internalServer) return;
         try {
@@ -56,15 +55,11 @@
                 });
             });
 
-            internalServer.on('error', function () {
-                // Якщо порт вже зайнятий — ігноруємо
-            });
-
+            internalServer.on('error', function () {});
             internalServer.listen(PROXY_PORT, '127.0.0.1');
         } catch (e) {}
     }
 
-    // Запускаємо проксі одразу
     ensureInternalProxy();
 
     function timeToSeconds(timeStr) {
@@ -99,12 +94,12 @@
                 const curSec = timeToSeconds(posMatch[1]);
                 const durSec = (durMatch && durMatch[1]) ? timeToSeconds(durMatch[1]) : 0;
 
-                if (curSec >= 0 && currentTimeline) {
+                if (curSec >= 0 && currentTimeline && currentTimeline.hash) {
                     currentTimeline.time = curSec;
-                    if (durSec > 0) {
-                        currentTimeline.duration = durSec;
-                        currentTimeline.percent = (curSec / durSec) * 100;
-                    }
+                    currentTimeline.duration = durSec || 0;
+                    currentTimeline.percent = durSec > 0 ? (curSec / durSec) * 100 : 0;
+                    
+                    // Записуємо оновлений прогрес у Lampa
                     Lampa.Timeline.update(currentTimeline);
                 }
             } else {
@@ -145,10 +140,12 @@
             }
 
             try {
-                var args = [videoUrl];
+                // ВАЖЛИВО: Параметр /start додаємо ДО посилання на відео!
+                var args = [];
                 if (targetTimeSec > 5) {
                     args.push('/start', Math.round(targetTimeSec * 1000));
                 }
+                args.push(videoUrl);
 
                 var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
                 if (playerProcess.unref) playerProcess.unref();
