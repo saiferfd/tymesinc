@@ -5,59 +5,49 @@
     var isWindows = navigator.platform.indexOf('Win') > -1 || navigator.userAgent.indexOf('Windows') > -1;
 
     var req = window.require || window.nodeRequire;
-    var node_cp = null;
+    var node_http = null;
     var node_fs = null;
 
     if (isWindows && req) {
-        try {
-            node_cp = req('child_process');
-        } catch (e) {}
-        try {
-            node_fs = req('fs');
-        } catch (e) {}
+        try { node_http = req('http'); } catch (e) {}
+        try { node_fs = req('fs'); } catch (e) {}
     }
 
-    if (!isWindows || !node_cp) {
-        console.log('MPC-BE Plugin: Запуск скасовано. Це не Windows PC середовище.');
+    if (!isWindows || !node_http) {
+        console.log('MPC-BE Plugin: Запуск скасовано. Це не Windows PC середовище або немає доступу до Node.');
         return;
     }
 
     // --- НАЛАШТУВАННЯ ---
-    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe';
-    var NODE_EXE_PATH = 'D:\\node.js\\node.exe';
-    var PROXY_SCRIPT_PATH = 'D:\\mpc-proxy.js';
-    var PROXY_URL = 'http://localhost:8080';
-    var MAX_FAILS = 1;
+    var MPC_WEB_PORT = 13579;  // порт веб-інтерфейсу MPC-BE (Відтворення -> Веб-інтерфейс)
+    var PROXY_PORT = 8080;     // порт нашого вбудованого проксі
+    var PROXY_URL = 'http://127.0.0.1:' + PROXY_PORT;
+    var MAX_FAILS = 3;         // трохи збільшив запас, щоб не відвалювалось на тимчасовий лаг
     var LOG_PATH = 'D:\\mpc_timesync.log';
 
     // --- Системні змінні ---
     var pollingInterval = null;
     var currentTimeline = null;
     var failCount = 0;
-    var proxyProcess = null;
-    var firstFailShown = false; // щоб не спамити тостами на кожен фейл
+    var proxyServer = null;
+    var firstFailShown = false;
 
     // --- ЛОГУВАННЯ: на екран (Noty) + у файл (якщо можливо) ---
     function log(msg, showOnScreen) {
         try {
             if (node_fs) {
-                var line = '[' + new Date().toISOString() + '] ' + msg + '\n';
-                node_fs.appendFileSync(LOG_PATH, line);
+                node_fs.appendFileSync(LOG_PATH, '[' + new Date().toISOString() + '] ' + msg + '\n');
             }
-        } catch (e) {
-            // файл не пишеться - не критично, бо є Noty
-        }
+        } catch (e) {}
 
         if (showOnScreen) {
-            try {
-                Lampa.Noty.show('MPC-BE debug: ' + msg);
-            } catch (e) {}
+            try { Lampa.Noty.show('MPC-BE: ' + msg); } catch (e) {}
         }
 
         try { console.log('[MPC-BE] ' + msg); } catch (e) {}
     }
 
-    log('Плагін завантажено', true);
+    log('Плагін завантажено', false);
 
     function timeToSeconds(timeStr) {
         if (!timeStr) return 0;
@@ -69,6 +59,52 @@
         return seconds;
     }
 
+    // --- ВБУДОВАНИЙ ПРОКСІ (без spawn, без whitelist-обмежень) ---
+    // Замінює окремий mpc-proxy.js: піднімає HTTP-сервер прямо в процесі Lampa
+    function ensureProxyServer(callback) {
+        if (proxyServer) {
+            callback();
+            return;
+        }
+
+        try {
+            proxyServer = node_http.createServer(function (request, response) {
+                response.setHeader('Access-Control-Allow-Origin', '*');
+                response.setHeader('Access-Control-Allow-Methods', 'OPTIONS, GET');
+                response.setHeader('Access-Control-Allow-Headers', '*');
+
+                if (request.method === 'OPTIONS') {
+                    response.writeHead(204);
+                    response.end();
+                    return;
+                }
+
+                var mpcReq = node_http.get('http://127.0.0.1:' + MPC_WEB_PORT + '/variables.html', function (mpcRes) {
+                    response.writeHead(mpcRes.statusCode, mpcRes.headers);
+                    mpcRes.pipe(response, { end: true });
+                });
+
+                mpcReq.on('error', function (err) {
+                    response.writeHead(502);
+                    response.end('Failed to connect to MPC-BE: ' + err.message);
+                });
+            });
+
+            proxyServer.on('error', function (err) {
+                log('Помилка вбудованого проксі-сервера: ' + err.message, true);
+                proxyServer = null;
+            });
+
+            proxyServer.listen(PROXY_PORT, '127.0.0.1', function () {
+                log('Вбудований проксі запущено на порту ' + PROXY_PORT, false);
+                callback();
+            });
+        } catch (err) {
+            log('Не вдалося підняти вбудований проксі: ' + err.message, true);
+            proxyServer = null;
+        }
+    }
+
     function stopPolling(reason) {
         if (pollingInterval) {
             clearInterval(pollingInterval);
@@ -76,16 +112,9 @@
             Lampa.Noty.show('MPC-BE: Синхронізацію зупинено' + (reason ? (' (' + reason + ')') : ''));
             log('Опитування зупинено. Причина: ' + (reason || 'невідома'), false);
         }
-        if (proxyProcess) {
-            try {
-                proxyProcess.kill();
-                log('Проксі-процес завершено (kill)', false);
-            } catch (err) {
-                log('Помилка при kill проксі-процесу: ' + err.message, false);
-            }
-            proxyProcess = null;
-        }
         firstFailShown = false;
+        // Проксі-сервер НЕ закриваємо - хай живе весь час роботи Lampa,
+        // це просто локальний http.Server у тому ж процесі, ресурсів майже не їсть.
     }
 
     async function pollMpcViaProxy() {
@@ -111,20 +140,19 @@
                     Lampa.Timeline.update(currentTimeline);
                 }
             } else {
-                throw new Error('Не знайдено positionstring у відповіді проксі');
+                throw new Error('Не знайдено positionstring (MPC-BE веб-інтерфейс не відповідає як очікувалось)');
             }
         } catch (error) {
             failCount++;
             var msg = 'Помилка опитування (' + failCount + '/' + MAX_FAILS + '): ' + error.message;
             log(msg, false);
 
-            // показуємо на екрані причину ПЕРШОГО фейлу - саме там зазвичай ключова інформація
             if (!firstFailShown) {
                 firstFailShown = true;
                 try { Lampa.Noty.show('MPC-BE debug: ' + msg); } catch (e) {}
             }
 
-            if (failCount > MAX_FAILS) stopPolling('немає відповіді від проксі: ' + error.message);
+            if (failCount > MAX_FAILS) stopPolling(error.message);
         }
     }
 
@@ -138,63 +166,21 @@
     }
 
     function initExternalPlayer() {
+        // ВАЖЛИВО: сам MPC-BE ми більше НЕ запускаємо -
+        // це вже робить сама Lampa через налаштування "зовнішній плеєр".
+        // Наше завдання - тільки піймати момент старту відтворення,
+        // підняти проксі і почати опитування для синхронізації прогресу.
         Lampa.Player.play = function (data) {
             stopPolling();
 
-            var videoUrl = data.url || data.file || "";
-            if (!videoUrl) {
-                log('play() викликано, але videoUrl порожній - вихід', true);
-                return;
-            }
-
             currentTimeline = data.timeline;
-            var targetTimeSec = (currentTimeline && currentTimeline.time) ? currentTimeline.time : 0;
 
-            log('play() викликано. targetTimeSec=' + targetTimeSec, true);
+            log('play() викликано, старт синхронізації', false);
 
-            // --- Запуск проксі ---
-            try {
-                proxyProcess = node_cp.spawn(NODE_EXE_PATH, [PROXY_SCRIPT_PATH], { detached: true, stdio: 'ignore' });
-
-                proxyProcess.on('error', function (err) {
-                    log('ПОМИЛКА (async) запуску проксі: ' + err.message, true);
-                });
-                proxyProcess.on('spawn', function () {
-                    log('Проксі успішно запущено, pid=' + proxyProcess.pid, true);
-                });
-
-                if (proxyProcess.unref) proxyProcess.unref();
-            } catch (err) {
-                log('СИНХРОННА ПОМИЛКА запуску проксі: ' + err.message, true);
-                stopPolling('помилка запуску проксі');
-                return;
-            }
-
-            // --- Запуск MPC-BE ---
-            setTimeout(function () {
-                try {
-                    var args = [videoUrl];
-                    if (targetTimeSec > 5) {
-                        args.push('/start', targetTimeSec * 1000);
-                    }
-
-                    var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
-
-                    playerProcess.on('error', function (err) {
-                        log('ПОМИЛКА (async) запуску MPC-BE: ' + err.message, true);
-                    });
-                    playerProcess.on('spawn', function () {
-                        log('MPC-BE успішно запущено, pid=' + playerProcess.pid, false);
-                    });
-
-                    if (playerProcess.unref) playerProcess.unref();
-
-                    setTimeout(startPolling, 2000);
-                } catch (err) {
-                    log('СИНХРОННА ПОМИЛКА запуску MPC-BE: ' + err.message, true);
-                    stopPolling('помилка запуску MPC-BE');
-                }
-            }, 1000);
+            ensureProxyServer(function () {
+                // невелика затримка, щоб MPC-BE встиг відкритись і підняти свій веб-інтерфейс
+                setTimeout(startPolling, 2000);
+            });
         };
     }
 
