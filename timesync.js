@@ -1,7 +1,6 @@
 (function () {
     'use strict';
 
-    // Перевірка платформи Windows та наявності Node.js у Lampa PC
     var isWindows = navigator.platform.indexOf('Win') > -1 || navigator.userAgent.indexOf('Windows') > -1;
     var req = window.require || window.nodeRequire;
 
@@ -21,17 +20,19 @@
     }
 
     // --- НАЛАШТУВАННЯ ---
-    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe'; // Шлях до вашого плеєра
+    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe';
     var PROXY_PORT = 8080;
     var MPC_PORT = 13579;
-    var MAX_FAILS = 30; // 60 секунд очікування
+    var MAX_FAILS = 30;
 
     var pollingInterval = null;
     var currentTimeline = null;
     var failCount = 0;
     var internalServer = null;
 
-    // Перетворення секунд у формат HH:MM:SS для MPC-BE
+    var targetTimeSec = 0;
+    var hasSought = false; // Прапорець перемотки
+
     function secondsToHms(d) {
         d = Number(d);
         var h = Math.floor(d / 3600);
@@ -40,7 +41,6 @@
         return (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
     }
 
-    // Вбудований проксі-сервер, який працює прямо в пам'яті Lampa
     function ensureInternalProxy() {
         if (internalServer) return;
         try {
@@ -71,7 +71,6 @@
         } catch (e) {}
     }
 
-    // Запускаємо сервер одразу при старті плагіна
     ensureInternalProxy();
 
     function timeToSeconds(timeStr) {
@@ -92,6 +91,21 @@
         }
     }
 
+    // Автоматична перемотка через Web UI MPC-BE
+    function seekMpcWebUi(seconds) {
+        if (hasSought || seconds <= 5) return;
+        hasSought = true;
+
+        var hms = secondsToHms(seconds);
+        var seekUrl = 'http://127.0.0.1:' + MPC_PORT + '/command.html?wm_command=-1&position=' + encodeURIComponent(hms);
+
+        try {
+            node_http.get(seekUrl, function () {
+                Lampa.Noty.show('MPC-BE: Перемотано на ' + hms);
+            }).on('error', function () {});
+        } catch (e) {}
+    }
+
     async function pollMpcViaProxy() {
         try {
             const response = await fetch('http://127.0.0.1:' + PROXY_PORT);
@@ -106,12 +120,16 @@
                 const curSec = timeToSeconds(posMatch[1]);
                 const durSec = (durMatch && durMatch[1]) ? timeToSeconds(durMatch[1]) : 0;
 
+                // Як тільки плеєр підключився до мережі — виконуємо перемотку!
+                if (!hasSought && targetTimeSec > 5) {
+                    seekMpcWebUi(targetTimeSec);
+                }
+
                 if (curSec >= 0 && currentTimeline && currentTimeline.hash) {
                     currentTimeline.time = curSec;
                     currentTimeline.duration = durSec || 0;
                     currentTimeline.percent = durSec > 0 ? (curSec / durSec) * 100 : 0;
                     
-                    // Зберігаємо в базу Lampa
                     Lampa.Timeline.update(currentTimeline);
                 }
             } else {
@@ -134,18 +152,18 @@
         Lampa.Player.play = function (data) {
             stopPolling();
             ensureInternalProxy();
+            hasSought = false; // Скидаємо прапорець перемотки
 
             var videoUrl = data.url || data.file || "";
             if (!videoUrl) return;
 
-            // Подвійний пошук зберігання часу
             var hash1 = (data.timeline && data.timeline.hash) ? data.timeline.hash : '';
             var hash2 = Lampa.Utils.hash(videoUrl);
 
             var view1 = hash1 ? Lampa.Timeline.view(hash1) : null;
             var view2 = hash2 ? Lampa.Timeline.view(hash2) : null;
 
-            var targetTimeSec = 0;
+            targetTimeSec = 0;
             if (data.timeline && data.timeline.time > 5) {
                 targetTimeSec = data.timeline.time;
             } else if (view1 && view1.time > 5) {
@@ -158,20 +176,14 @@
             currentTimeline = data.timeline || {};
             currentTimeline.hash = activeHash;
 
-            Lampa.Noty.show('MPC-BE: Старт з ' + Math.round(targetTimeSec) + ' сек.');
+            Lampa.Noty.show('MPC-BE: Старт з ' + secondsToHms(targetTimeSec));
 
             try {
-                var args = [];
-                // Формат /startpos HH:MM:SS для MPC-BE
-                if (targetTimeSec > 5) {
-                    args.push('/startpos', secondsToHms(targetTimeSec));
-                }
-                args.push(videoUrl);
-
-                var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
+                // Запускаємо плеєр без заплутаних параметрів
+                var playerProcess = node_cp.spawn(MPC_PATH, [videoUrl], { detached: true, stdio: 'ignore' });
                 if (playerProcess.unref) playerProcess.unref();
 
-                setTimeout(startPolling, 3000);
+                setTimeout(startPolling, 2000);
             } catch (err) {
                 Lampa.Noty.show('Помилка запуску: ' + err.message);
                 stopPolling();
