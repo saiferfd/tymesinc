@@ -4,7 +4,7 @@
     // --- ПЕРЕВІРКА ПЛАТФОРМИ ---
     // Перевіряємо, чи це Windows
     var isWindows = navigator.platform.indexOf('Win') > -1 || navigator.userAgent.indexOf('Windows') > -1;
-    
+
     // Перевіряємо наявність середовища Node.js (NW.js / Electron), яке є тільки в програмі для ПК
     var req = window.require || window.nodeRequire;
     var node_cp = null;
@@ -16,7 +16,6 @@
     }
 
     // Якщо це не Windows або це просто браузер/ТВ/Андроїд — повністю виходимо з плагіна.
-    // Це збереже стандартний плеєр Lampa на інших пристроях недоторканим.
     if (!isWindows || !node_cp) {
         console.log('MPC-BE Plugin: Запуск скасовано. Це не Windows PC середовище.');
         return;
@@ -29,11 +28,15 @@
     var PROXY_URL = 'http://localhost:8080';
     var MAX_FAILS = 1;
 
+    // Поріг у секундах: якщо до кінця серії лишилось менше цього - вважаємо, що серія закінчилась
+    var NEXT_EPISODE_THRESHOLD = 3;
+
     // --- Системні змінні ---
     var pollingInterval = null;
     var currentTimeline = null;
     var failCount = 0;
     var proxyProcess = null;
+    var nextEpisodeTriggered = false; // щоб не натискати "наступна серія" по кілька разів
 
     function timeToSeconds(timeStr) {
         if (!timeStr) return 0;
@@ -58,12 +61,29 @@
             proxyProcess = null;
         }
     }
-    
+
+    // --- АВТОПЕРЕХІД ДО НАСТУПНОЇ СЕРІЇ ---
+    // Оскільки відео грає у зовнішньому MPC-BE, Lampa не отримує подію "ended" від
+    // свого внутрішнього відеодвижка, тому штатний автоперехід не спрацьовує.
+    // Тому самі натискаємо кнопку "наступна серія" в панелі плеєра, коли бачимо,
+    // що позиція відтворення впритул наблизилась до тривалості серії.
+    function triggerNextEpisode() {
+        try {
+            var $next = window.jQuery ? window.jQuery('.player-panel__next') : (window.$ ? window.$('.player-panel__next') : null);
+            if ($next && $next.length) {
+                $next.click();
+                Lampa.Noty.show('MPC-BE: Автоперехід до наступної серії');
+            }
+        } catch (e) {
+            // якщо кнопки немає (остання серія) чи щось пішло не так - просто ігноруємо
+        }
+    }
+
     async function pollMpcViaProxy() {
         try {
             const response = await fetch(PROXY_URL);
             if (!response.ok) throw new Error();
-            
+
             const data = await response.text();
             const posMatch = data.match(/id="positionstring"[^>]*>\s*(.*?)\s*</i);
             const durMatch = data.match(/id="durationstring"[^>]*>\s*(.*?)\s*</i);
@@ -81,6 +101,12 @@
                     }
                     Lampa.Timeline.update(currentTimeline);
                 }
+
+                // Перевірка на завершення серії
+                if (!nextEpisodeTriggered && durSec > 0 && (durSec - curSec) <= NEXT_EPISODE_THRESHOLD) {
+                    nextEpisodeTriggered = true;
+                    triggerNextEpisode();
+                }
             } else {
                 throw new Error();
             }
@@ -93,6 +119,7 @@
     function startPolling() {
         if (pollingInterval) clearInterval(pollingInterval);
         failCount = 0;
+        nextEpisodeTriggered = false;
         pollingInterval = setInterval(pollMpcViaProxy, 2000);
         pollMpcViaProxy();
     }
@@ -100,8 +127,8 @@
     function initExternalPlayer() {
         // Підміняємо плеєр ТІЛЬКИ на Windows
         Lampa.Player.play = function (data) {
-            stopPolling(); 
-            
+            stopPolling();
+
             var videoUrl = data.url || data.file || "";
             if (!videoUrl) return;
 
