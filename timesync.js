@@ -23,9 +23,9 @@
     }
 
     // --- НАЛАШТУВАННЯ ---
-    var MPC_PATH = 'D:\MPC-BE\mpc-be64.exe'; // Вкажіть правильний шлях до вашого плеєру!!!
-    var NODE_EXE_PATH = 'D:\node.js\node.exe'; // Вкажіть правильний шлях до вашого node.exe !!!
-    var PROXY_SCRIPT_PATH = 'D:\mpc-proxy.js';  // Вкажіть правильний шлях до вашого проксі !!!
+    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe'; // Вкажіть правильний шлях до вашого плеєру!!!
+    var NODE_EXE_PATH = 'D:\\node.js\\node.exe'; // Вкажіть правильний шлях до вашого node.exe !!!
+    var PROXY_SCRIPT_PATH = 'D:\\mpc-proxy.js';  // Вкажіть правильний шлях до вашого проксі !!!
     var PROXY_URL = 'http://localhost:8080';
     var MAX_FAILS = 1;
 
