@@ -2,10 +2,7 @@
     'use strict';
 
     // --- ПЕРЕВІРКА ПЛАТФОРМИ ---
-    // Перевіряємо, чи це Windows
     var isWindows = navigator.platform.indexOf('Win') > -1 || navigator.userAgent.indexOf('Windows') > -1;
-    
-    // Перевіряємо наявність середовища Node.js (NW.js / Electron), яке є тільки в програмі для ПК
     var req = window.require || window.nodeRequire;
     var node_cp = null;
 
@@ -15,17 +12,15 @@
         } catch (e) {}
     }
 
-    // Якщо це не Windows або це просто браузер/ТВ/Андроїд — повністю виходимо з плагіна.
-    // Це збереже стандартний плеєр Lampa на інших пристроях недоторканим.
     if (!isWindows || !node_cp) {
         console.log('MPC-BE Plugin: Запуск скасовано. Це не Windows PC середовище.');
         return;
     }
 
     // --- НАЛАШТУВАННЯ ---
-    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe'; // Вкажіть правильний шлях до вашого плеєру!!!
-    var NODE_EXE_PATH = 'D:\\node.js\\node.exe'; // Вкажіть правильний шлях до вашого node.exe !!!
-    var PROXY_SCRIPT_PATH = 'D:\\mpc-proxy.js';  // Вкажіть правильний шлях до вашого проксі !!!
+    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe';
+    var NODE_EXE_PATH = 'D:\\node.js\\node.exe';
+    var PROXY_SCRIPT_PATH = 'D:\\mpc-proxy.js';
     var PROXY_URL = 'http://localhost:8080';
     var MAX_FAILS = 15;
 
@@ -62,7 +57,7 @@
     async function pollMpcViaProxy() {
         try {
             const response = await fetch(PROXY_URL);
-            if (!response.ok) throw new Error();
+            if (!response.ok) throw new Error('Proxy status not OK');
             
             const data = await response.text();
             const posMatch = data.match(/id="positionstring"[^>]*>\s*(.*?)\s*</i);
@@ -79,10 +74,11 @@
                         currentTimeline.duration = durSec;
                         currentTimeline.percent = (curSec / durSec) * 100;
                     }
+                    // Записуємо прогрес у базу Lampa
                     Lampa.Timeline.update(currentTimeline);
                 }
             } else {
-                throw new Error();
+                throw new Error('Position not found in HTML');
             }
         } catch (error) {
             failCount++;
@@ -98,15 +94,29 @@
     }
 
     function initExternalPlayer() {
-        // Підміняємо плеєр ТІЛЬКИ на Windows
         Lampa.Player.play = function (data) {
             stopPolling(); 
             
             var videoUrl = data.url || data.file || "";
             if (!videoUrl) return;
 
-            currentTimeline = data.timeline;
-            var targetTimeSec = (currentTimeline && currentTimeline.time) ? currentTimeline.time : 0;
+            // --- ФІКС ТАЙМЛАЙНУ ТА ХЕШУ ---
+            // Створюємо хеш фільму, якщо його немає, щоб Lampa розуміла, що це за відео
+            var itemHash = (data.timeline && data.timeline.hash) ? data.timeline.hash : Lampa.Utils.hash(videoUrl);
+            
+            // Перевіряємо збережений прогрес перегляду в Lampa
+            var savedTimeline = Lampa.Timeline.view(itemHash);
+            
+            currentTimeline = data.timeline || {};
+            currentTimeline.hash = itemHash;
+
+            // Визначаємо секунду, з якої треба продовжити перегляд
+            var targetTimeSec = 0;
+            if (savedTimeline && savedTimeline.time > 5) {
+                targetTimeSec = savedTimeline.time;
+            } else if (currentTimeline && currentTimeline.time > 5) {
+                targetTimeSec = currentTimeline.time;
+            }
 
             try {
                 proxyProcess = node_cp.spawn(NODE_EXE_PATH, [PROXY_SCRIPT_PATH], { detached: true, stdio: 'ignore' });
@@ -114,15 +124,19 @@
 
                 setTimeout(function() {
                     var args = [videoUrl];
+                    
+                    // Якщо є збережений час (> 5 сек) — передаємо команду /start у мілісекундах для MPC-BE
                     if (targetTimeSec > 5) {
-                        args.push('/start', targetTimeSec * 1000);
+                        args.push('/start', Math.round(targetTimeSec * 1000));
                     }
+
                     var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
                     if (playerProcess.unref) playerProcess.unref();
 
                     setTimeout(startPolling, 2000);
                 }, 1000);
             } catch (err) {
+                Lampa.Noty.show('Помилка запуску: ' + err.message);
                 stopPolling();
             }
         };
