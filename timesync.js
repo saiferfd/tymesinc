@@ -30,6 +30,15 @@
     var failCount = 0;
     var internalServer = null;
 
+    // Перетворення секунд у формат HH:MM:SS для MPC-BE
+    function secondsToHms(d) {
+        d = Number(d);
+        var h = Math.floor(d / 3600);
+        var m = Math.floor(d % 3600 / 60);
+        var s = Math.floor(d % 3600 % 60);
+        return (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
+    }
+
     function ensureInternalProxy() {
         if (internalServer) return;
         try {
@@ -99,7 +108,6 @@
                     currentTimeline.duration = durSec || 0;
                     currentTimeline.percent = durSec > 0 ? (curSec / durSec) * 100 : 0;
                     
-                    // Записуємо оновлений прогрес у Lampa
                     Lampa.Timeline.update(currentTimeline);
                 }
             } else {
@@ -126,24 +134,34 @@
             var videoUrl = data.url || data.file || "";
             if (!videoUrl) return;
 
-            var itemHash = (data.timeline && data.timeline.hash) ? data.timeline.hash : Lampa.Utils.hash(videoUrl);
-            var savedTimeline = Lampa.Timeline.view(itemHash);
+            // Подвійний пошук хешу
+            var hash1 = (data.timeline && data.timeline.hash) ? data.timeline.hash : '';
+            var hash2 = Lampa.Utils.hash(videoUrl);
 
-            currentTimeline = data.timeline || {};
-            currentTimeline.hash = itemHash;
+            var view1 = hash1 ? Lampa.Timeline.view(hash1) : null;
+            var view2 = hash2 ? Lampa.Timeline.view(hash2) : null;
 
             var targetTimeSec = 0;
-            if (savedTimeline && savedTimeline.time > 5) {
-                targetTimeSec = savedTimeline.time;
-            } else if (currentTimeline && currentTimeline.time > 5) {
-                targetTimeSec = currentTimeline.time;
+            if (data.timeline && data.timeline.time > 5) {
+                targetTimeSec = data.timeline.time;
+            } else if (view1 && view1.time > 5) {
+                targetTimeSec = view1.time;
+            } else if (view2 && view2.time > 5) {
+                targetTimeSec = view2.time;
             }
 
+            var activeHash = hash1 || hash2;
+            currentTimeline = data.timeline || {};
+            currentTimeline.hash = activeHash;
+
+            // Повідомлення для тестування (покаже, скільки секунд знайшла Lampa)
+            Lampa.Noty.show('MPC-BE: Старт з ' + Math.round(targetTimeSec) + ' сек.');
+
             try {
-                // ВАЖЛИВО: Параметр /start додаємо ДО посилання на відео!
                 var args = [];
+                // Використовуємо офіційний формат MPC-BE: /startpos HH:MM:SS
                 if (targetTimeSec > 5) {
-                    args.push('/start', Math.round(targetTimeSec * 1000));
+                    args.push('/startpos', secondsToHms(targetTimeSec));
                 }
                 args.push(videoUrl);
 
