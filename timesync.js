@@ -1,34 +1,35 @@
 (function () {
     'use strict';
 
-    // --- ПЕРЕВІРКА ПЛАТФОРМИ ---
+    // Перевірка платформи Windows та наявності Node.js у Lampa PC
     var isWindows = navigator.platform.indexOf('Win') > -1 || navigator.userAgent.indexOf('Windows') > -1;
     var req = window.require || window.nodeRequire;
+
     var node_cp = null;
+    var node_http = null;
 
     if (isWindows && req) {
         try {
             node_cp = req('child_process');
+            node_http = req('http');
         } catch (e) {}
     }
 
-    if (!isWindows || !node_cp) {
-        console.log('MPC-BE Plugin: Запуск скасовано. Це не Windows PC середовище.');
+    if (!isWindows || !node_cp || !node_http) {
+        console.log('MPC-BE Plugin: Скасовано (немає необхідних модулів)');
         return;
     }
 
     // --- НАЛАШТУВАННЯ ---
-    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe';
-    var NODE_EXE_PATH = 'D:\\node.js\\node.exe';
-    var PROXY_SCRIPT_PATH = 'D:\\mpc-proxy.js';
-    var PROXY_URL = 'http://localhost:8080';
-    var MAX_FAILS = 15; // Збільшено ліміт очікування!
+    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe'; // Шлях до вашого плеєра
+    var PROXY_PORT = 8080;
+    var MPC_PORT = 13579;
+    var MAX_FAILS = 30; // 60 секунд очікування
 
-    // --- Системні змінні ---
     var pollingInterval = null;
     var currentTimeline = null;
     var failCount = 0;
-    var proxyProcess = null;
+    var internalServer = null;
 
     // Перетворення секунд у формат HH:MM:SS для MPC-BE
     function secondsToHms(d) {
@@ -38,6 +39,40 @@
         var s = Math.floor(d % 3600 % 60);
         return (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s;
     }
+
+    // Вбудований проксі-сервер, який працює прямо в пам'яті Lampa
+    function ensureInternalProxy() {
+        if (internalServer) return;
+        try {
+            internalServer = node_http.createServer(function (req, res) {
+                res.setHeader('Access-Control-Allow-Origin', '*');
+                res.setHeader('Access-Control-Allow-Methods', 'OPTIONS, GET');
+                res.setHeader('Access-Control-Allow-Headers', '*');
+
+                if (req.method === 'OPTIONS') {
+                    res.writeHead(204);
+                    res.end();
+                    return;
+                }
+
+                var proxyReq = node_http.get('http://127.0.0.1:' + MPC_PORT + '/variables.html', function (mpcRes) {
+                    res.writeHead(mpcRes.statusCode, mpcRes.headers);
+                    mpcRes.pipe(res, { end: true });
+                });
+
+                proxyReq.on('error', function () {
+                    res.writeHead(502);
+                    res.end('MPC-BE not responding');
+                });
+            });
+
+            internalServer.on('error', function () {});
+            internalServer.listen(PROXY_PORT, '127.0.0.1');
+        } catch (e) {}
+    }
+
+    // Запускаємо сервер одразу при старті плагіна
+    ensureInternalProxy();
 
     function timeToSeconds(timeStr) {
         if (!timeStr) return 0;
@@ -55,19 +90,13 @@
             pollingInterval = null;
             Lampa.Noty.show('MPC-BE: Синхронізацію зупинено');
         }
-        if (proxyProcess) {
-            try {
-                proxyProcess.kill();
-            } catch (err) {}
-            proxyProcess = null;
-        }
     }
-    
+
     async function pollMpcViaProxy() {
         try {
-            const response = await fetch(PROXY_URL);
+            const response = await fetch('http://127.0.0.1:' + PROXY_PORT);
             if (!response.ok) throw new Error();
-            
+
             const data = await response.text();
             const posMatch = data.match(/id="positionstring"[^>]*>\s*(.*?)\s*</i);
             const durMatch = data.match(/id="durationstring"[^>]*>\s*(.*?)\s*</i);
@@ -82,7 +111,7 @@
                     currentTimeline.duration = durSec || 0;
                     currentTimeline.percent = durSec > 0 ? (curSec / durSec) * 100 : 0;
                     
-                    // Зберігаємо прогрес у базу Lampa
+                    // Зберігаємо в базу Lampa
                     Lampa.Timeline.update(currentTimeline);
                 }
             } else {
@@ -103,12 +132,13 @@
 
     function initExternalPlayer() {
         Lampa.Player.play = function (data) {
-            stopPolling(); 
-            
+            stopPolling();
+            ensureInternalProxy();
+
             var videoUrl = data.url || data.file || "";
             if (!videoUrl) return;
 
-            // Подвійний пошук хешу та збереженого часу
+            // Подвійний пошук зберігання часу
             var hash1 = (data.timeline && data.timeline.hash) ? data.timeline.hash : '';
             var hash2 = Lampa.Utils.hash(videoUrl);
 
@@ -124,29 +154,24 @@
                 targetTimeSec = view2.time;
             }
 
+            var activeHash = hash1 || hash2;
             currentTimeline = data.timeline || {};
-            currentTimeline.hash = hash1 || hash2;
+            currentTimeline.hash = activeHash;
 
             Lampa.Noty.show('MPC-BE: Старт з ' + Math.round(targetTimeSec) + ' сек.');
 
             try {
-                // Запуск проксі з додаванням shell: true для надійності в Windows
-                proxyProcess = node_cp.spawn(NODE_EXE_PATH, [PROXY_SCRIPT_PATH], { detached: true, shell: true, stdio: 'ignore' });
-                if (proxyProcess.unref) proxyProcess.unref();
+                var args = [];
+                // Формат /startpos HH:MM:SS для MPC-BE
+                if (targetTimeSec > 5) {
+                    args.push('/startpos', secondsToHms(targetTimeSec));
+                }
+                args.push(videoUrl);
 
-                setTimeout(function() {
-                    // Команда /startpos HH:MM:SS передається ДО посилання на відео
-                    var args = [];
-                    if (targetTimeSec > 5) {
-                        args.push('/startpos', secondsToHms(targetTimeSec));
-                    }
-                    args.push(videoUrl);
+                var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
+                if (playerProcess.unref) playerProcess.unref();
 
-                    var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
-                    if (playerProcess.unref) playerProcess.unref();
-
-                    setTimeout(startPolling, 3000);
-                }, 1000);
+                setTimeout(startPolling, 3000);
             } catch (err) {
                 Lampa.Noty.show('Помилка запуску: ' + err.message);
                 stopPolling();
