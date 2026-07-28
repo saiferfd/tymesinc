@@ -28,12 +28,10 @@
     // Поріг у секундах до кінця серії, при якому вважаємо що вона закінчилась
     var NEXT_EPISODE_THRESHOLD = 3;
 
-    // Скільки разів перевіряти готовність стріму перед запуском MPC-BE
-    var STREAM_READY_MAX_ATTEMPTS = 15;
-    // Затримка між перевірками готовності стріму (мс)
-    var STREAM_READY_DELAY_MS = 1000;
-    // Додаткова страхувальна пауза (мс) після підтвердження готовності стріму, перед запуском MPC-BE
-    var STREAM_EXTRA_DELAY_MS = 3000;
+    // Пауза (мс) після старту проксі-сервера перед запуском MPC-BE.
+    // Активну перевірку готовності стріму навмисно прибрано (див. коментар нижче) -
+    // повторні запити до стріму самі заважали торрент-серверу завершити preload.
+    var PROXY_STARTUP_DELAY_MS = 1000;
 
     // --- Системні змінні ---
     var pollingInterval = null;
@@ -139,51 +137,16 @@
         pollMpcViaProxy();
     }
 
-    // --- ОЧІКУВАННЯ ГОТОВНОСТІ СТРІМУ ---
-    // Замість фіксованої затримки перед запуском MPC-BE, опитуємо сам URL стріму,
-    // поки torrent-сервер не почне реально віддавати дані (або поки не вичерпаються спроби).
-    function waitForStreamReady(url, maxAttempts, delayMs) {
-        return new Promise(function (resolve) {
-            var attempt = 0;
-
-            function tryOnce() {
-                attempt++;
-                console.log('[MPC-DEBUG] Перевірка готовності стріму (Range GET), спроба', attempt, 'з', maxAttempts);
-                fetch(url, { method: 'GET', headers: { 'Range': 'bytes=0-65535' } })
-                    .then(function (resp) {
-                        console.log('[MPC-DEBUG] Range-відповідь статус:', resp ? resp.status : 'немає відповіді');
-                        if (!resp || (!resp.ok && resp.status !== 206)) {
-                            throw new Error('bad status');
-                        }
-                        return resp.arrayBuffer();
-                    })
-                    .then(function (buf) {
-                        console.log('[MPC-DEBUG] Отримано реальних байт:', buf.byteLength);
-                        if (buf.byteLength > 0) {
-                            resolve(true);
-                        } else if (attempt >= maxAttempts) {
-                            resolve(false);
-                        } else {
-                            setTimeout(tryOnce, delayMs);
-                        }
-                    })
-                    .catch(function (err) {
-                        console.log('[MPC-DEBUG] Range-запит впав з помилкою:', err);
-                        if (attempt >= maxAttempts) {
-                            resolve(false);
-                        } else {
-                            setTimeout(tryOnce, delayMs);
-                        }
-                    });
-            }
-
-            tryOnce();
-        });
-    }
+    // Примітка: раніше тут була активна перевірка готовності стріму через повторні
+    // fetch-запити (HEAD / Range GET) до URL стріму. Від неї відмовились: кожен такий
+    // запит відкриває нове з'єднання до торрент-стрім-сервера, а сервер трактує кожне
+    // нове з'єднання як нову сесію відтворення і скидає/перезапускає preload заново.
+    // Через це стрім ніколи не встигав "дозріти" - наші ж перевірки й заважали.
+    // Замість цього просто запускаємо MPC-BE напряму (як і при ручному відкритті URL,
+    // яке працює стабільно), з невеликою фіксованою паузою для проксі-сервера.
 
     function initExternalPlayer() {
         Lampa.Player.play = function (data) {
-            console.log('[MPC-DEBUG] Повний об\'єкт data:', JSON.stringify(data, null, 2));
             stopPolling();
 
             var videoUrl = data.url || data.file || "";
@@ -213,39 +176,28 @@
                 proxyProcess = node_cp.spawn(NODE_EXE_PATH, [PROXY_SCRIPT_PATH], { detached: true, stdio: 'ignore' });
                 if (proxyProcess.unref) proxyProcess.unref();
 
-                Lampa.Noty.show('MPC-BE: Очікування готовності потоку...');
-
-                waitForStreamReady(videoUrl, STREAM_READY_MAX_ATTEMPTS, STREAM_READY_DELAY_MS).then(function (ready) {
-                    if (!ready) {
-                        Lampa.Noty.show('MPC-BE: Потік не готовий, спробуйте ще раз пізніше');
-                        stopPolling();
-                        return;
+                setTimeout(function () {
+                    var args = [videoUrl];
+                    if (targetTimeSec > 5) {
+                        args.push('/start', String(targetTimeSec * 1000));
                     }
 
-                    console.log('[MPC-DEBUG] Стрім готовий, додаткова страхувальна пауза перед запуском...');
-                    setTimeout(function () {
-                        var args = [videoUrl];
-                        if (targetTimeSec > 5) {
-                            args.push('/start', String(targetTimeSec * 1000));
-                        }
+                    console.log('[MPC-DEBUG] Запуск MPC-BE:', MPC_PATH, 'з аргументами:', JSON.stringify(args));
 
-                        console.log('[MPC-DEBUG] Запуск MPC-BE:', MPC_PATH, 'з аргументами:', JSON.stringify(args));
+                    var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
 
-                        var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
+                    playerProcess.on('error', function (err) {
+                        console.log('[MPC-DEBUG] Помилка запуску процесу MPC-BE:', err);
+                    });
 
-                        playerProcess.on('error', function (err) {
-                            console.log('[MPC-DEBUG] Помилка запуску процесу MPC-BE:', err);
-                        });
+                    playerProcess.on('exit', function (code, signal) {
+                        console.log('[MPC-DEBUG] MPC-BE завершився з кодом:', code, 'сигнал:', signal);
+                    });
 
-                        playerProcess.on('exit', function (code, signal) {
-                            console.log('[MPC-DEBUG] MPC-BE завершився з кодом:', code, 'сигнал:', signal);
-                        });
+                    if (playerProcess.unref) playerProcess.unref();
 
-                        if (playerProcess.unref) playerProcess.unref();
-
-                        setTimeout(startPolling, 2000);
-                    }, STREAM_EXTRA_DELAY_MS);
-                });
+                    setTimeout(startPolling, 2000);
+                }, PROXY_STARTUP_DELAY_MS);
             } catch (err) {
                 stopPolling();
             }
