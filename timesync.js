@@ -2,13 +2,10 @@
     'use strict';
 
     var currentEpisodeIndex = -1;
+    var currentHash = null;
     var nextEpisodeTriggered = false;
-    
-    var lastTimeLeft = 999999;
-    var lastDuration = 0;
-    var lastTime = 0;
 
-    // Запам'ятовуємо ПОРЯДКОВИЙ НОМЕР серії
+    // 1. Запам'ятовуємо ПОРЯДКОВИЙ НОМЕР серії при кліку
     $(document).on('click hover:enter', '.torrent-list > .online-prestige.selector', function () {
         var $allEpisodes = $('.torrent-list > .online-prestige.selector');
         currentEpisodeIndex = $allEpisodes.index(this);
@@ -18,7 +15,6 @@
     function playNextEpisode() {
         if (currentEpisodeIndex === -1) return;
 
-        // Шукаємо елементи заново, бо Лампа могла перемалювати сторінку
         var $allEpisodes = $('.torrent-list > .online-prestige.selector');
         var nextIndex = currentEpisodeIndex + 1;
         
@@ -27,59 +23,64 @@
             currentEpisodeIndex = nextIndex;
             nextEpisodeTriggered = true;
             
-            // Три способи "достукатися" до Лампи
-            $next.trigger('hover:enter'); // Симуляція пульта
-            $next.click();                // Симуляція jQuery
-            
-            // Нативний клік мишкою
+            // Натискаємо на наступну
+            $next.trigger('hover:enter');
+            $next.trigger('click');
             var el = $next[0];
-            if (el) {
-                el.dispatchEvent(new MouseEvent('click', { view: window, bubbles: true, cancelable: true }));
-            }
+            if (el) el.dispatchEvent(new MouseEvent('click', { view: window, bubbles: true, cancelable: true }));
         } else {
             Lampa.Noty.show('Автоперехід: Це остання серія');
         }
     }
 
     function initAutoNext() {
-        var originalUpdate = Lampa.Timeline.update;
-        
-        Lampa.Timeline.update = function (data) {
-            if (originalUpdate) originalUpdate.apply(Lampa.Timeline, arguments);
-
-            if (data && data.duration && data.time) {
-                lastDuration = data.duration;
-                lastTime = data.time;
-                lastTimeLeft = data.duration - data.time;
+        // 2. Перехоплюємо старт плеєра, щоб отримати ХЕШ поточного відео
+        var originalPlay = Lampa.Player.play;
+        Lampa.Player.play = function (data) {
+            if (data && data.timeline && data.timeline.hash) {
+                currentHash = data.timeline.hash;
             }
+            if (originalPlay) originalPlay.apply(this, arguments);
         };
 
-        // Ловимо закриття плеєра
+        // 3. Ловимо закриття плеєра
         Lampa.Player.listener.follow('destroy', function () {
-            if (nextEpisodeTriggered) return;
+            if (nextEpisodeTriggered || !currentHash) return;
 
-            var percentWatched = lastDuration > 0 ? (lastTime / lastDuration) : 0;
-            
-            // Якщо продивились >80% або залишалось < 3 хвилин (180 сек)
-            if (lastDuration > 60 && (lastTimeLeft <= 180 || percentWatched > 0.80)) {
-                nextEpisodeTriggered = true;
-                Lampa.Noty.show('Наступна серія за 2 сек...');
-                
-                // Затримка 2 секунди, щоб інтерфейс Лампи встиг відновитися
-                setTimeout(function() {
-                    playNextEpisode();
-                }, 2000);
-            }
+            // Чекаємо 2.5 секунди, поки милиця VLC збереже таймкоди в Лампу
+            setTimeout(function() {
+                // Дістаємо історію переглядів безпосередньо з бази Лампи
+                var fileViews = Lampa.Storage.get('file_view', {});
+                var info = fileViews[currentHash];
+
+                if (info && info.duration && info.duration > 60) {
+                    var lastTime = info.time || 0;
+                    var lastDuration = info.duration;
+                    var timeLeft = lastDuration - lastTime;
+                    var percentWatched = lastTime / lastDuration;
+                    var percentText = Math.round(percentWatched * 100);
+
+                    // ВИВОДИМО НА ЕКРАН, ЩО ЗБЕРЕГЛОСЬ В БАЗІ
+                    Lampa.Noty.show('Збережений прогрес серії: ' + percentText + '%');
+
+                    // Якщо переглянуто > 85% АБО до кінця залишилось менше 3 хвилин
+                    if (percentWatched > 0.85 || timeLeft <= 180) {
+                        nextEpisodeTriggered = true;
+                        setTimeout(playNextEpisode, 500); // Ще півсекунди затримки для надійності кліку
+                    }
+                } else {
+                    Lampa.Noty.show('Помилка автопереходу: таймкод серії не зберігся');
+                }
+            }, 2500);
         });
 
+        // Скидання перед початком
         Lampa.Player.listener.follow('start', function () {
             nextEpisodeTriggered = false;
-            lastTimeLeft = 999999;
-            lastDuration = 0;
-            lastTime = 0;
         });
     }
 
+    // Запуск плагіна
     if (window.appready) initAutoNext();
     else {
         Lampa.Listener.follow('app', function (e) {
