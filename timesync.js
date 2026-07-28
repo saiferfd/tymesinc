@@ -1,6 +1,26 @@
 (function () {
     'use strict';
 
+    // --- ANTI-CRASH HACK (ЗАХИСТ ВІД ЗЕЛЕНОГО ЕКРАНУ) ---
+    // Додаємо безпечну функцію .kill() до всіх базових типів. 
+    // Це приховує баг десктопної Лампи, коли вона намагається вбити вже мертвий процес VLC.
+    ['Object', 'String', 'Number', 'Boolean', 'Array'].forEach(function(type) {
+        if (window[type] && !window[type].prototype.kill) {
+            Object.defineProperty(window[type].prototype, 'kill', {
+                value: function() { console.log('Анти-краш: перехоплено виклик .kill() для мертвого процесу'); },
+                writable: true,
+                configurable: true,
+                enumerable: false // Важливо, щоб не зламати інші цикли в Лампі
+            });
+        }
+    });
+
+    // На випадок, якщо змінна глобальна
+    if (typeof window.currentPlayerProcess !== 'undefined') {
+        window.currentPlayerProcess = null;
+    }
+    // ---------------------------------------------------
+
     var currentHash = null;
     var currentEpisodeIndex = -1;
     var lastSeenTime = -1; 
@@ -66,15 +86,9 @@
                 
                 if (percentWatched > 0.85 || timeLeft <= 180) {
                     nextEpisodeTriggered = true;
-                    Lampa.Noty.show('Збережено! Наступна серія за 4 сек...');
+                    Lampa.Noty.show('Збережено! Наступна серія за 3 сек...');
                     
-                    // --- НОВЕ: Примусово очищаємо стан плеєра в Лампі ---
-                    try {
-                        if (Lampa.Player) Lampa.Player.destroy();
-                    } catch (e) {}
-
-                    // --- НОВЕ: Збільшено затримку до 4 секунд, щоб уникнути конфлікту процесів ---
-                    setTimeout(playNextEpisode, 4000);
+                    setTimeout(playNextEpisode, 3000);
                 } else {
                     lastSeenTime = currentTime; 
                 }
@@ -82,5 +96,5 @@
         }
     }, 2000);
 
-    console.log('Lampa Auto-Next: Сканер активовано (з фіксом крашу)');
+    console.log('Lampa Auto-Next: Сканер активовано (з ANTI-CRASH фіксом)');
 })();
