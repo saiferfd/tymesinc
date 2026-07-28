@@ -176,6 +176,19 @@
             var videoUrl = data.url || data.file || "";
             if (!videoUrl) return;
 
+            // Прибираємо подвійне urlencoding (наприклад %2520 -> %20 -> пробіл),
+            // яке інакше псує посилання при передачі напряму в командний рядок MPC-BE.
+            try {
+                var decodedOnce = decodeURIComponent(videoUrl);
+                // Декодуємо ще раз лише якщо після першого декодування залишились
+                // "закодовані" послідовності виду %XX - ознака подвійного кодування.
+                if (/%[0-9A-Fa-f]{2}/.test(decodedOnce)) {
+                    videoUrl = decodedOnce;
+                }
+            } catch (e) {
+                // якщо декодування впало (некоректна послідовність) - лишаємо як є
+            }
+
             currentTimeline = data.timeline;
             var targetTimeSec = (currentTimeline && currentTimeline.time) ? currentTimeline.time : 0;
 
