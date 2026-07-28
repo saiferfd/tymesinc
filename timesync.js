@@ -183,6 +183,7 @@
 
     function initExternalPlayer() {
         Lampa.Player.play = function (data) {
+            console.log('[MPC-DEBUG] Повний об\'єкт data:', JSON.stringify(data, null, 2));
             stopPolling();
 
             var videoUrl = data.url || data.file || "";
