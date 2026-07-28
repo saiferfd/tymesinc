@@ -146,8 +146,10 @@
 
             function tryOnce() {
                 attempt++;
+                console.log('[MPC-DEBUG] Перевірка готовності стріму, спроба', attempt, 'з', maxAttempts);
                 fetch(url, { method: 'HEAD' })
                     .then(function (resp) {
+                        console.log('[MPC-DEBUG] HEAD-відповідь статус:', resp ? resp.status : 'немає відповіді');
                         if (resp && (resp.ok || resp.status === 206)) {
                             resolve(true);
                         } else if (attempt >= maxAttempts) {
@@ -156,7 +158,8 @@
                             setTimeout(tryOnce, delayMs);
                         }
                     })
-                    .catch(function () {
+                    .catch(function (err) {
+                        console.log('[MPC-DEBUG] HEAD-запит впав з помилкою:', err);
                         if (attempt >= maxAttempts) {
                             resolve(false);
                         } else {
@@ -176,6 +179,8 @@
             var videoUrl = data.url || data.file || "";
             if (!videoUrl) return;
 
+            console.log('[MPC-DEBUG] Оригінальний URL:', videoUrl);
+
             // Прибираємо подвійне urlencoding (наприклад %2520 -> %20 -> пробіл),
             // яке інакше псує посилання при передачі напряму в командний рядок MPC-BE.
             try {
@@ -186,8 +191,10 @@
                     videoUrl = decodedOnce;
                 }
             } catch (e) {
-                // якщо декодування впало (некоректна послідовність) - лишаємо як є
+                console.log('[MPC-DEBUG] Помилка декодування URL:', e);
             }
+
+            console.log('[MPC-DEBUG] URL після декодування:', videoUrl);
 
             currentTimeline = data.timeline;
             var targetTimeSec = (currentTimeline && currentTimeline.time) ? currentTimeline.time : 0;
@@ -210,7 +217,18 @@
                         args.push('/start', String(targetTimeSec * 1000));
                     }
 
+                    console.log('[MPC-DEBUG] Запуск MPC-BE:', MPC_PATH, 'з аргументами:', JSON.stringify(args));
+
                     var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
+
+                    playerProcess.on('error', function (err) {
+                        console.log('[MPC-DEBUG] Помилка запуску процесу MPC-BE:', err);
+                    });
+
+                    playerProcess.on('exit', function (code, signal) {
+                        console.log('[MPC-DEBUG] MPC-BE завершився з кодом:', code, 'сигнал:', signal);
+                    });
+
                     if (playerProcess.unref) playerProcess.unref();
 
                     setTimeout(startPolling, 2000);
