@@ -2,10 +2,8 @@
     'use strict';
 
     // --- ПЕРЕВІРКА ПЛАТФОРМИ ---
-    // Перевіряємо, чи це Windows
     var isWindows = navigator.platform.indexOf('Win') > -1 || navigator.userAgent.indexOf('Windows') > -1;
 
-    // Перевіряємо наявність середовища Node.js (NW.js / Electron), яке є тільки в програмі для ПК
     var req = window.require || window.nodeRequire;
     var node_cp = null;
 
@@ -15,20 +13,19 @@
         } catch (e) {}
     }
 
-    // Якщо це не Windows або це просто браузер/ТВ/Андроїд — повністю виходимо з плагіна.
     if (!isWindows || !node_cp) {
         console.log('MPC-BE Plugin: Запуск скасовано. Це не Windows PC середовище.');
         return;
     }
 
     // --- НАЛАШТУВАННЯ ---
-    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe'; // Вкажіть правильний шлях до вашого плеєру!!!
-    var NODE_EXE_PATH = 'D:\\node.js\\node.exe'; // Вкажіть правильний шлях до вашого node.exe !!!
-    var PROXY_SCRIPT_PATH = 'D:\\mpc-proxy.js';  // Вкажіть правильний шлях до вашого проксі !!!
+    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe';
+    var NODE_EXE_PATH = 'D:\\node.js\\node.exe';
+    var PROXY_SCRIPT_PATH = 'D:\\mpc-proxy.js';
     var PROXY_URL = 'http://localhost:8080';
     var MAX_FAILS = 1;
 
-    // Поріг у секундах: якщо до кінця серії лишилось менше цього - вважаємо, що серія закінчилась
+    // Поріг у секундах до кінця серії, при якому вважаємо що вона закінчилась
     var NEXT_EPISODE_THRESHOLD = 3;
 
     // --- Системні змінні ---
@@ -36,7 +33,16 @@
     var currentTimeline = null;
     var failCount = 0;
     var proxyProcess = null;
-    var nextEpisodeTriggered = false; // щоб не натискати "наступна серія" по кілька разів
+    var nextEpisodeTriggered = false;
+
+    // Запам'ятовуємо DOM-елемент рядка серії, який востаннє клікнули (вручну чи автоматично)
+    var $lastEpisodeRow = null;
+
+    // Ловимо клік по будь-якому рядку серії в списку .torrent-list,
+    // щоб знати, з якого місця рахувати "наступну"
+    $(document).on('click hover:enter', '.torrent-list > .online-prestige.selector', function () {
+        $lastEpisodeRow = $(this);
+    });
 
     function timeToSeconds(timeStr) {
         if (!timeStr) return 0;
@@ -63,19 +69,22 @@
     }
 
     // --- АВТОПЕРЕХІД ДО НАСТУПНОЇ СЕРІЇ ---
-    // Оскільки відео грає у зовнішньому MPC-BE, Lampa не отримує подію "ended" від
-    // свого внутрішнього відеодвижка, тому штатний автоперехід не спрацьовує.
-    // Тому самі натискаємо кнопку "наступна серія" в панелі плеєра, коли бачимо,
-    // що позиція відтворення впритул наблизилась до тривалості серії.
+    // Список серій - плоский список сусідніх .online-prestige.selector
+    // елементів всередині .torrent-list. Беремо запам'ятований рядок
+    // поточної серії і клікаємо по наступному в тому ж списку.
     function triggerNextEpisode() {
         try {
-            var $next = window.jQuery ? window.jQuery('.player-panel__next') : (window.$ ? window.$('.player-panel__next') : null);
-            if ($next && $next.length) {
-                $next.click();
+            if (!$lastEpisodeRow || !$lastEpisodeRow.length) return;
+
+            var $next = $lastEpisodeRow.nextAll('.online-prestige.selector').first();
+            if ($next.length) {
                 Lampa.Noty.show('MPC-BE: Автоперехід до наступної серії');
+                $next.trigger('hover:enter');
+                $next.trigger('click');
+                $lastEpisodeRow = $next;
             }
         } catch (e) {
-            // якщо кнопки немає (остання серія) чи щось пішло не так - просто ігноруємо
+            // остання серія чи список іншої структури - просто нічого не робимо
         }
     }
 
@@ -102,7 +111,6 @@
                     Lampa.Timeline.update(currentTimeline);
                 }
 
-                // Перевірка на завершення серії
                 if (!nextEpisodeTriggered && durSec > 0 && (durSec - curSec) <= NEXT_EPISODE_THRESHOLD) {
                     nextEpisodeTriggered = true;
                     triggerNextEpisode();
@@ -125,7 +133,6 @@
     }
 
     function initExternalPlayer() {
-        // Підміняємо плеєр ТІЛЬКИ на Windows
         Lampa.Player.play = function (data) {
             stopPolling();
 
@@ -139,7 +146,7 @@
                 proxyProcess = node_cp.spawn(NODE_EXE_PATH, [PROXY_SCRIPT_PATH], { detached: true, stdio: 'ignore' });
                 if (proxyProcess.unref) proxyProcess.unref();
 
-                setTimeout(function() {
+                setTimeout(function () {
                     var args = [videoUrl];
                     if (targetTimeSec > 5) {
                         args.push('/start', targetTimeSec * 1000);
