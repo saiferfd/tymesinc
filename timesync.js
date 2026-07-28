@@ -1,37 +1,20 @@
 (function () {
     'use strict';
 
-    // --- ANTI-CRASH HACK (ЗАХИСТ ВІД ЗЕЛЕНОГО ЕКРАНУ) ---
-    // Додаємо безпечну функцію .kill() до всіх базових типів. 
-    // Це приховує баг десктопної Лампи, коли вона намагається вбити вже мертвий процес VLC.
-    ['Object', 'String', 'Number', 'Boolean', 'Array'].forEach(function(type) {
-        if (window[type] && !window[type].prototype.kill) {
-            Object.defineProperty(window[type].prototype, 'kill', {
-                value: function() { console.log('Анти-краш: перехоплено виклик .kill() для мертвого процесу'); },
-                writable: true,
-                configurable: true,
-                enumerable: false // Важливо, щоб не зламати інші цикли в Лампі
-            });
-        }
-    });
-
-    // На випадок, якщо змінна глобальна
-    if (typeof window.currentPlayerProcess !== 'undefined') {
-        window.currentPlayerProcess = null;
-    }
-    // ---------------------------------------------------
-
     var currentHash = null;
     var currentEpisodeIndex = -1;
     var lastSeenTime = -1; 
+    var timeStalledCount = 0; // Лічильник секунд, скільки час "стоїть на місці"
     var nextEpisodeTriggered = false;
 
-    // Ловимо клік по серії
+    // 1. Ловимо клік по серії
     $(document).on('click hover:enter', '.torrent-list > .online-prestige.selector', function () {
         var $allEpisodes = $('.torrent-list > .online-prestige.selector');
         currentEpisodeIndex = $allEpisodes.index(this);
         currentHash = $(this).find('.time-line').attr('data-hash');
+        
         nextEpisodeTriggered = false;
+        timeStalledCount = 0;
 
         if (currentHash) {
             var fileViews = Lampa.Storage.get('file_view', {});
@@ -49,8 +32,10 @@
         if (nextIndex < $allEpisodes.length) {
             var $next = $allEpisodes.eq(nextIndex);
             
+            // Оновлюємо змінні для нової серії
             currentEpisodeIndex = nextIndex;
             currentHash = $next.find('.time-line').attr('data-hash');
+            timeStalledCount = 0;
             
             if (currentHash) {
                 var fileViews = Lampa.Storage.get('file_view', {});
@@ -58,19 +43,20 @@
                 lastSeenTime = (info && info.time) ? info.time : 0;
             }
 
-            // Натискаємо на наступну
-            $next.trigger('hover:enter');
-            $next.trigger('click');
+            // ВІДПРАВЛЯЄМО РІВНО ОДИН КЛІК (захист від дублів і крашів)
             var el = $next[0];
-            if (el) el.dispatchEvent(new MouseEvent('click', { view: window, bubbles: true, cancelable: true }));
+            if (el) {
+                el.dispatchEvent(new MouseEvent('click', { view: window, bubbles: true, cancelable: true }));
+            }
 
-            setTimeout(function() { nextEpisodeTriggered = false; }, 3000);
+            // Блокуємо сканер на 5 секунд, поки завантажується нове відео
+            setTimeout(function() { nextEpisodeTriggered = false; }, 5000);
         } else {
             Lampa.Noty.show('Автоперехід: Це остання серія');
         }
     }
 
-    // Сканер
+    // 2. Сканер бази даних (працює кожні 2 секунди)
     setInterval(function() {
         if (!currentHash || nextEpisodeTriggered || currentEpisodeIndex === -1) return;
 
@@ -79,22 +65,27 @@
 
         if (info && info.duration && info.duration > 60) {
             var currentTime = info.time || 0;
-            var timeLeft = info.duration - currentTime;
             var percentWatched = currentTime / info.duration;
+            var timeLeft = info.duration - currentTime;
 
-            if (Math.abs(currentTime - lastSeenTime) > 5) {
+            // Перевіряємо, чи час "стоїть на місці" (VLC закрився)
+            if (Math.abs(currentTime - lastSeenTime) < 2) { 
+                timeStalledCount++; // Час не змінився
+            } else {
+                timeStalledCount = 0; // Час змінився (відео йде), скидаємо лічильник
+                lastSeenTime = currentTime;
+            }
+
+            // Якщо час не змінюється 4 секунди (timeStalledCount >= 2) 
+            // І ми знаходимось в кінці серії (>85% або <3 хв до кінця)
+            if (timeStalledCount >= 2 && (percentWatched > 0.85 || timeLeft <= 180)) {
+                nextEpisodeTriggered = true;
+                Lampa.Noty.show('Серія завершена. Запуск наступної...');
                 
-                if (percentWatched > 0.85 || timeLeft <= 180) {
-                    nextEpisodeTriggered = true;
-                    Lampa.Noty.show('Збережено! Наступна серія за 3 сек...');
-                    
-                    setTimeout(playNextEpisode, 3000);
-                } else {
-                    lastSeenTime = currentTime; 
-                }
+                playNextEpisode();
             }
         }
     }, 2000);
 
-    console.log('Lampa Auto-Next: Сканер активовано (з ANTI-CRASH фіксом)');
+    console.log('Lampa Auto-Next: Встановлено розумний сканер зупинки часу');
 })();
