@@ -1,47 +1,43 @@
 (function () {
     'use strict';
 
-    var $lastEpisodeRow = null;
+    var currentEpisodeIndex = -1;
     var nextEpisodeTriggered = false;
     
-    // Змінні для відстеження прогресу перед закриттям VLC
     var lastTimeLeft = 999999;
     var lastDuration = 0;
     var lastTime = 0;
 
-    // Ловимо клік по серії
+    // Запам'ятовуємо ПОРЯДКОВИЙ НОМЕР серії
     $(document).on('click hover:enter', '.torrent-list > .online-prestige.selector', function () {
-        $lastEpisodeRow = $(this);
+        var $allEpisodes = $('.torrent-list > .online-prestige.selector');
+        currentEpisodeIndex = $allEpisodes.index(this);
         nextEpisodeTriggered = false;
     });
 
     function playNextEpisode() {
-        if (!$lastEpisodeRow || !$lastEpisodeRow.length) {
-            console.log('Автоперехід: Немає прив\'язки до списку серій');
-            return;
-        }
+        if (currentEpisodeIndex === -1) return;
 
-        var $next = $lastEpisodeRow.nextAll('.online-prestige.selector').first();
-        if ($next.length) {
-            Lampa.Noty.show('Автоперехід до наступної серії...');
-            
-            // Оновлюємо рядок, щоб наступний перехід теж спрацював
-            $lastEpisodeRow = $next;
+        // Шукаємо елементи заново, бо Лампа могла перемалювати сторінку
+        var $allEpisodes = $('.torrent-list > .online-prestige.selector');
+        var nextIndex = currentEpisodeIndex + 1;
+        
+        if (nextIndex < $allEpisodes.length) {
+            var $next = $allEpisodes.eq(nextIndex);
+            currentEpisodeIndex = nextIndex;
             nextEpisodeTriggered = true;
-
-            // Нативна симуляція кліку (більш надійна для Лампи)
+            
+            // Три способи "достукатися" до Лампи
+            $next.trigger('hover:enter'); // Симуляція пульта
+            $next.click();                // Симуляція jQuery
+            
+            // Нативний клік мишкою
             var el = $next[0];
             if (el) {
-                var clickEvent = new MouseEvent('click', {
-                    view: window,
-                    bubbles: true,
-                    cancelable: true
-                });
-                el.dispatchEvent(clickEvent);
-                $next.trigger('hover:enter'); // На випадок якщо слухається пульт
+                el.dispatchEvent(new MouseEvent('click', { view: window, bubbles: true, cancelable: true }));
             }
         } else {
-            Lampa.Noty.show('Це остання серія в списку');
+            Lampa.Noty.show('Автоперехід: Це остання серія');
         }
     }
 
@@ -55,42 +51,33 @@
                 lastDuration = data.duration;
                 lastTime = data.time;
                 lastTimeLeft = data.duration - data.time;
-
-                // Умова 1: Завчасне перемикання (якщо оновлення прийшло на останніх 10 секундах)
-                if (!nextEpisodeTriggered && lastDuration > 60 && lastTimeLeft <= 10 && lastTimeLeft >= 0) {
-                    nextEpisodeTriggered = true;
-                    playNextEpisode();
-                }
             }
         };
 
-        // Умова 2: Плеєр закрився сам (VLC дійшов до кінця файлу)
+        // Ловимо закриття плеєра
         Lampa.Player.listener.follow('destroy', function () {
-            if (nextEpisodeTriggered) return; // Якщо вже перемкнули, нічого не робимо
+            if (nextEpisodeTriggered) return;
 
-            // Якщо плеєр закрився, і ми були близько до кінця 
-            // (залишалось менше 45 сек АБО переглянуто більше 95%)
-            if (lastDuration > 60 && (lastTimeLeft <= 45 || (lastTime / lastDuration) > 0.95)) {
+            var percentWatched = lastDuration > 0 ? (lastTime / lastDuration) : 0;
+            
+            // Якщо продивились >80% або залишалось < 3 хвилин (180 сек)
+            if (lastDuration > 60 && (lastTimeLeft <= 180 || percentWatched > 0.80)) {
                 nextEpisodeTriggered = true;
-                Lampa.Noty.show('Серія завершилась, запуск наступної...');
+                Lampa.Noty.show('Наступна серія за 2 сек...');
                 
-                // Даємо Лампі 1.5 секунди, щоб вона штатно закрила старий плеєр і повернула інтерфейс,
-                // після чого "клікаємо" на наступну серію
+                // Затримка 2 секунди, щоб інтерфейс Лампи встиг відновитися
                 setTimeout(function() {
                     playNextEpisode();
-                }, 1500);
+                }, 2000);
             }
         });
 
-        // Скидаємо змінні при старті нового відео
         Lampa.Player.listener.follow('start', function () {
             nextEpisodeTriggered = false;
             lastTimeLeft = 999999;
             lastDuration = 0;
             lastTime = 0;
         });
-        
-        console.log('Lampa Auto-Next: Ініціалізовано (перехоплення destroy)');
     }
 
     if (window.appready) initAutoNext();
