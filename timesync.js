@@ -32,6 +32,8 @@
     var STREAM_READY_MAX_ATTEMPTS = 15;
     // Затримка між перевірками готовності стріму (мс)
     var STREAM_READY_DELAY_MS = 1000;
+    // Додаткова страхувальна пауза (мс) після підтвердження готовності стріму, перед запуском MPC-BE
+    var STREAM_EXTRA_DELAY_MS = 3000;
 
     // --- Системні змінні ---
     var pollingInterval = null;
@@ -146,11 +148,18 @@
 
             function tryOnce() {
                 attempt++;
-                console.log('[MPC-DEBUG] Перевірка готовності стріму, спроба', attempt, 'з', maxAttempts);
-                fetch(url, { method: 'HEAD' })
+                console.log('[MPC-DEBUG] Перевірка готовності стріму (Range GET), спроба', attempt, 'з', maxAttempts);
+                fetch(url, { method: 'GET', headers: { 'Range': 'bytes=0-65535' } })
                     .then(function (resp) {
-                        console.log('[MPC-DEBUG] HEAD-відповідь статус:', resp ? resp.status : 'немає відповіді');
-                        if (resp && (resp.ok || resp.status === 206)) {
+                        console.log('[MPC-DEBUG] Range-відповідь статус:', resp ? resp.status : 'немає відповіді');
+                        if (!resp || (!resp.ok && resp.status !== 206)) {
+                            throw new Error('bad status');
+                        }
+                        return resp.arrayBuffer();
+                    })
+                    .then(function (buf) {
+                        console.log('[MPC-DEBUG] Отримано реальних байт:', buf.byteLength);
+                        if (buf.byteLength > 0) {
                             resolve(true);
                         } else if (attempt >= maxAttempts) {
                             resolve(false);
@@ -159,7 +168,7 @@
                         }
                     })
                     .catch(function (err) {
-                        console.log('[MPC-DEBUG] HEAD-запит впав з помилкою:', err);
+                        console.log('[MPC-DEBUG] Range-запит впав з помилкою:', err);
                         if (attempt >= maxAttempts) {
                             resolve(false);
                         } else {
@@ -212,26 +221,29 @@
                         return;
                     }
 
-                    var args = [videoUrl];
-                    if (targetTimeSec > 5) {
-                        args.push('/start', String(targetTimeSec * 1000));
-                    }
+                    console.log('[MPC-DEBUG] Стрім готовий, додаткова страхувальна пауза перед запуском...');
+                    setTimeout(function () {
+                        var args = [videoUrl];
+                        if (targetTimeSec > 5) {
+                            args.push('/start', String(targetTimeSec * 1000));
+                        }
 
-                    console.log('[MPC-DEBUG] Запуск MPC-BE:', MPC_PATH, 'з аргументами:', JSON.stringify(args));
+                        console.log('[MPC-DEBUG] Запуск MPC-BE:', MPC_PATH, 'з аргументами:', JSON.stringify(args));
 
-                    var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
+                        var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
 
-                    playerProcess.on('error', function (err) {
-                        console.log('[MPC-DEBUG] Помилка запуску процесу MPC-BE:', err);
-                    });
+                        playerProcess.on('error', function (err) {
+                            console.log('[MPC-DEBUG] Помилка запуску процесу MPC-BE:', err);
+                        });
 
-                    playerProcess.on('exit', function (code, signal) {
-                        console.log('[MPC-DEBUG] MPC-BE завершився з кодом:', code, 'сигнал:', signal);
-                    });
+                        playerProcess.on('exit', function (code, signal) {
+                            console.log('[MPC-DEBUG] MPC-BE завершився з кодом:', code, 'сигнал:', signal);
+                        });
 
-                    if (playerProcess.unref) playerProcess.unref();
+                        if (playerProcess.unref) playerProcess.unref();
 
-                    setTimeout(startPolling, 2000);
+                        setTimeout(startPolling, 2000);
+                    }, STREAM_EXTRA_DELAY_MS);
                 });
             } catch (err) {
                 stopPolling();
