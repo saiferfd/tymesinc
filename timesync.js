@@ -28,6 +28,11 @@
     // Поріг у секундах до кінця серії, при якому вважаємо що вона закінчилась
     var NEXT_EPISODE_THRESHOLD = 3;
 
+    // Скільки разів перевіряти готовність стріму перед запуском MPC-BE
+    var STREAM_READY_MAX_ATTEMPTS = 15;
+    // Затримка між перевірками готовності стріму (мс)
+    var STREAM_READY_DELAY_MS = 1000;
+
     // --- Системні змінні ---
     var pollingInterval = null;
     var currentTimeline = null;
@@ -132,6 +137,38 @@
         pollMpcViaProxy();
     }
 
+    // --- ОЧІКУВАННЯ ГОТОВНОСТІ СТРІМУ ---
+    // Замість фіксованої затримки перед запуском MPC-BE, опитуємо сам URL стріму,
+    // поки torrent-сервер не почне реально віддавати дані (або поки не вичерпаються спроби).
+    function waitForStreamReady(url, maxAttempts, delayMs) {
+        return new Promise(function (resolve) {
+            var attempt = 0;
+
+            function tryOnce() {
+                attempt++;
+                fetch(url, { method: 'HEAD' })
+                    .then(function (resp) {
+                        if (resp && (resp.ok || resp.status === 206)) {
+                            resolve(true);
+                        } else if (attempt >= maxAttempts) {
+                            resolve(false);
+                        } else {
+                            setTimeout(tryOnce, delayMs);
+                        }
+                    })
+                    .catch(function () {
+                        if (attempt >= maxAttempts) {
+                            resolve(false);
+                        } else {
+                            setTimeout(tryOnce, delayMs);
+                        }
+                    });
+            }
+
+            tryOnce();
+        });
+    }
+
     function initExternalPlayer() {
         Lampa.Player.play = function (data) {
             stopPolling();
@@ -146,17 +183,25 @@
                 proxyProcess = node_cp.spawn(NODE_EXE_PATH, [PROXY_SCRIPT_PATH], { detached: true, stdio: 'ignore' });
                 if (proxyProcess.unref) proxyProcess.unref();
 
-                setTimeout(function () {
+                Lampa.Noty.show('MPC-BE: Очікування готовності потоку...');
+
+                waitForStreamReady(videoUrl, STREAM_READY_MAX_ATTEMPTS, STREAM_READY_DELAY_MS).then(function (ready) {
+                    if (!ready) {
+                        Lampa.Noty.show('MPC-BE: Потік не готовий, спробуйте ще раз пізніше');
+                        stopPolling();
+                        return;
+                    }
+
                     var args = [videoUrl];
                     if (targetTimeSec > 5) {
-                        args.push('/start', targetTimeSec * 1000);
+                        args.push('/start', String(targetTimeSec * 1000));
                     }
-                    console.log('MPC ARGS:', JSON.stringify(args));
+
                     var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
                     if (playerProcess.unref) playerProcess.unref();
 
                     setTimeout(startPolling, 2000);
-                }, 1000);
+                });
             } catch (err) {
                 stopPolling();
             }
