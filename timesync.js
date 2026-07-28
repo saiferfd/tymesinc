@@ -1,135 +1,77 @@
 (function () {
     'use strict';
 
-    // --- ПЕРЕВІРКА ПЛАТФОРМИ ---
-    // Перевіряємо, чи це Windows
-    var isWindows = navigator.platform.indexOf('Win') > -1 || navigator.userAgent.indexOf('Windows') > -1;
+    var $lastEpisodeRow = null;
+    var nextEpisodeTriggered = false;
     
-    // Перевіряємо наявність середовища Node.js (NW.js / Electron), яке є тільки в програмі для ПК
-    var req = window.require || window.nodeRequire;
-    var node_cp = null;
+    // Поріг у секундах до кінця серії, при якому вмикаємо наступну
+    var NEXT_EPISODE_THRESHOLD = 5; 
 
-    if (isWindows && req) {
+    // Ловимо клік по серії, щоб знати, з якого місця рахувати "наступну"
+    $(document).on('click hover:enter', '.torrent-list > .online-prestige.selector', function () {
+        $lastEpisodeRow = $(this);
+        nextEpisodeTriggered = false; // Скидаємо прапорець при ручному виборі
+    });
+
+    function triggerNextEpisode() {
         try {
-            node_cp = req('child_process');
-        } catch (e) {}
-    }
+            if (!$lastEpisodeRow || !$lastEpisodeRow.length) return;
 
-    // Якщо це не Windows або це просто браузер/ТВ/Андроїд — повністю виходимо з плагіна.
-    // Це збереже стандартний плеєр Lampa на інших пристроях недоторканим.
-    if (!isWindows || !node_cp) {
-        console.log('MPC-BE Plugin: Запуск скасовано. Це не Windows PC середовище.');
-        return;
-    }
-
-    // --- НАЛАШТУВАННЯ ---
-    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe'; // Вкажіть правильний шлях до вашого плеєру!!!
-    var NODE_EXE_PATH = 'D:\\node.js\\node.exe'; // Вкажіть правильний шлях до вашого node.exe !!!
-    var PROXY_SCRIPT_PATH = 'D:\\mpc-proxy.js';  // Вкажіть правильний шлях до вашого проксі !!!
-    var PROXY_URL = 'http://localhost:8080';
-    var MAX_FAILS = 1;
-
-    // --- Системні змінні ---
-    var pollingInterval = null;
-    var currentTimeline = null;
-    var failCount = 0;
-    var proxyProcess = null;
-
-    function timeToSeconds(timeStr) {
-        if (!timeStr) return 0;
-        var parts = timeStr.trim().split(':').reverse();
-        var seconds = 0;
-        if (parts[0]) seconds += parseInt(parts[0], 10);
-        if (parts[1]) seconds += parseInt(parts[1], 10) * 60;
-        if (parts[2]) seconds += parseInt(parts[2], 10) * 3600;
-        return seconds;
-    }
-
-    function stopPolling() {
-        if (pollingInterval) {
-            clearInterval(pollingInterval);
-            pollingInterval = null;
-            Lampa.Noty.show('MPC-BE: Синхронізацію зупинено');
-        }
-        if (proxyProcess) {
-            try {
-                proxyProcess.kill();
-            } catch (err) {}
-            proxyProcess = null;
-        }
-    }
-    
-    async function pollMpcViaProxy() {
-        try {
-            const response = await fetch(PROXY_URL);
-            if (!response.ok) throw new Error();
-            
-            const data = await response.text();
-            const posMatch = data.match(/id="positionstring"[^>]*>\s*(.*?)\s*</i);
-            const durMatch = data.match(/id="durationstring"[^>]*>\s*(.*?)\s*</i);
-
-            if (posMatch && posMatch[1]) {
-                failCount = 0;
-                const curSec = timeToSeconds(posMatch[1]);
-                const durSec = (durMatch && durMatch[1]) ? timeToSeconds(durMatch[1]) : 0;
-
-                if (curSec >= 0 && currentTimeline) {
-                    currentTimeline.time = curSec;
-                    if (durSec > 0) {
-                        currentTimeline.duration = durSec;
-                        currentTimeline.percent = (curSec / durSec) * 100;
-                    }
-                    Lampa.Timeline.update(currentTimeline);
-                }
+            var $next = $lastEpisodeRow.nextAll('.online-prestige.selector').first();
+            if ($next.length) {
+                Lampa.Noty.show('Автоперехід до наступної серії');
+                $next.trigger('hover:enter');
+                $next.trigger('click');
+                $lastEpisodeRow = $next;
             } else {
-                throw new Error();
+                Lampa.Noty.show('Це остання серія в списку');
             }
-        } catch (error) {
-            failCount++;
-            if (failCount > MAX_FAILS) stopPolling();
+        } catch (e) {
+            console.log('Помилка автопереходу:', e);
         }
     }
 
-    function startPolling() {
-        if (pollingInterval) clearInterval(pollingInterval);
-        failCount = 0;
-        pollingInterval = setInterval(pollMpcViaProxy, 2000);
-        pollMpcViaProxy();
-    }
+    function initAutoNext() {
+        // Перехоплюємо стандартне збереження таймкодів Лампи
+        var originalTimelineUpdate = Lampa.Timeline.update;
+        
+        Lampa.Timeline.update = function (data) {
+            // Викликаємо оригінальну функцію, щоб Лампа зберегла прогрес як зазвичай
+            if (originalTimelineUpdate) {
+                originalTimelineUpdate.apply(Lampa.Timeline, arguments);
+            }
 
-    function initExternalPlayer() {
-        // Підміняємо плеєр ТІЛЬКИ на Windows
-        Lampa.Player.play = function (data) {
-            stopPolling(); 
-            
-            var videoUrl = data.url || data.file || "";
-            if (!videoUrl) return;
+            // data містить { time: поточний_час, duration: загальна_тривалість, ... }
+            if (data && data.duration && data.time) {
+                var timeLeft = data.duration - data.time;
 
-            currentTimeline = data.timeline;
-            var targetTimeSec = (currentTimeline && currentTimeline.time) ? currentTimeline.time : 0;
-
-            try {
-                proxyProcess = node_cp.spawn(NODE_EXE_PATH, [PROXY_SCRIPT_PATH], { detached: true, stdio: 'ignore' });
-                if (proxyProcess.unref) proxyProcess.unref();
-
-                setTimeout(function() {
-                    var args = [videoUrl];
-                    if (targetTimeSec > 5) {
-                        args.push('/start', targetTimeSec * 1000);
-                    }
-                    var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
-                    if (playerProcess.unref) playerProcess.unref();
-
-                    setTimeout(startPolling, 2000);
-                }, 1000);
-            } catch (err) {
-                stopPolling();
+                // Умова спрацьовування: 
+                // 1. Ще не спрацьовувало (nextEpisodeTriggered)
+                // 2. Тривалість більше 60 сек (захист від глюків при завантаженні плеєра)
+                // 3. Залишилось менше NEXT_EPISODE_THRESHOLD секунд
+                if (!nextEpisodeTriggered && data.duration > 60 && timeLeft <= NEXT_EPISODE_THRESHOLD && timeLeft >= 0) {
+                    nextEpisodeTriggered = true;
+                    triggerNextEpisode();
+                }
             }
         };
+
+        // Скидаємо прапорець при запуску нового плеєра або його закритті
+        Lampa.Player.listener.follow('start', function () {
+            nextEpisodeTriggered = false;
+        });
+        Lampa.Player.listener.follow('destroy', function () {
+            nextEpisodeTriggered = false;
+        });
+        
+        console.log('Lampa Auto-Next Episode: Ініціалізовано');
     }
 
-    Lampa.Player.listener.follow('destroy', stopPolling);
-    if (window.appready) initExternalPlayer();
-    else Lampa.Listener.follow('app', (e) => { if (e.type == 'ready') initExternalPlayer(); });
-
+    // Запуск плагіна після повного завантаження Лампи
+    if (window.appready) initAutoNext();
+    else {
+        Lampa.Listener.follow('app', function (e) {
+            if (e.type == 'ready') initAutoNext();
+        });
+    }
 })();
