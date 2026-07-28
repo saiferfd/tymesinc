@@ -2,8 +2,10 @@
     'use strict';
 
     // --- ПЕРЕВІРКА ПЛАТФОРМИ ---
+    // Перевіряємо, чи це Windows
     var isWindows = navigator.platform.indexOf('Win') > -1 || navigator.userAgent.indexOf('Windows') > -1;
-
+    
+    // Перевіряємо наявність середовища Node.js (NW.js / Electron), яке є тільки в програмі для ПК
     var req = window.require || window.nodeRequire;
     var node_cp = null;
 
@@ -13,41 +15,25 @@
         } catch (e) {}
     }
 
+    // Якщо це не Windows або це просто браузер/ТВ/Андроїд — повністю виходимо з плагіна.
+    // Це збереже стандартний плеєр Lampa на інших пристроях недоторканим.
     if (!isWindows || !node_cp) {
         console.log('MPC-BE Plugin: Запуск скасовано. Це не Windows PC середовище.');
         return;
     }
 
     // --- НАЛАШТУВАННЯ ---
-    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe';
-    var NODE_EXE_PATH = 'D:\\node.js\\node.exe';
-    var PROXY_SCRIPT_PATH = 'D:\\mpc-proxy.js';
+    var MPC_PATH = 'D:\\MPC-BE\\mpc-be64.exe'; // Вкажіть правильний шлях до вашого плеєру!!!
+    var NODE_EXE_PATH = 'D:\\node.js\\node.exe'; // Вкажіть правильний шлях до вашого node.exe !!!
+    var PROXY_SCRIPT_PATH = 'D:\\mpc-proxy.js';  // Вкажіть правильний шлях до вашого проксі !!!
     var PROXY_URL = 'http://localhost:8080';
     var MAX_FAILS = 1;
-
-    // Поріг у секундах до кінця серії, при якому вважаємо що вона закінчилась
-    var NEXT_EPISODE_THRESHOLD = 3;
-
-    // Пауза (мс) після старту проксі-сервера перед запуском MPC-BE.
-    // Активну перевірку готовності стріму навмисно прибрано (див. коментар нижче) -
-    // повторні запити до стріму самі заважали торрент-серверу завершити preload.
-    var PROXY_STARTUP_DELAY_MS = 1000;
 
     // --- Системні змінні ---
     var pollingInterval = null;
     var currentTimeline = null;
     var failCount = 0;
     var proxyProcess = null;
-    var nextEpisodeTriggered = false;
-
-    // Запам'ятовуємо DOM-елемент рядка серії, який востаннє клікнули (вручну чи автоматично)
-    var $lastEpisodeRow = null;
-
-    // Ловимо клік по будь-якому рядку серії в списку .torrent-list,
-    // щоб знати, з якого місця рахувати "наступну"
-    $(document).on('click hover:enter', '.torrent-list > .online-prestige.selector', function () {
-        $lastEpisodeRow = $(this);
-    });
 
     function timeToSeconds(timeStr) {
         if (!timeStr) return 0;
@@ -72,32 +58,12 @@
             proxyProcess = null;
         }
     }
-
-    // --- АВТОПЕРЕХІД ДО НАСТУПНОЇ СЕРІЇ ---
-    // Список серій - плоский список сусідніх .online-prestige.selector
-    // елементів всередині .torrent-list. Беремо запам'ятований рядок
-    // поточної серії і клікаємо по наступному в тому ж списку.
-    function triggerNextEpisode() {
-        try {
-            if (!$lastEpisodeRow || !$lastEpisodeRow.length) return;
-
-            var $next = $lastEpisodeRow.nextAll('.online-prestige.selector').first();
-            if ($next.length) {
-                Lampa.Noty.show('MPC-BE: Автоперехід до наступної серії');
-                $next.trigger('hover:enter');
-                $next.trigger('click');
-                $lastEpisodeRow = $next;
-            }
-        } catch (e) {
-            // остання серія чи список іншої структури - просто нічого не робимо
-        }
-    }
-
+    
     async function pollMpcViaProxy() {
         try {
             const response = await fetch(PROXY_URL);
             if (!response.ok) throw new Error();
-
+            
             const data = await response.text();
             const posMatch = data.match(/id="positionstring"[^>]*>\s*(.*?)\s*</i);
             const durMatch = data.match(/id="durationstring"[^>]*>\s*(.*?)\s*</i);
@@ -115,11 +81,6 @@
                     }
                     Lampa.Timeline.update(currentTimeline);
                 }
-
-                if (!nextEpisodeTriggered && durSec > 0 && (durSec - curSec) <= NEXT_EPISODE_THRESHOLD) {
-                    nextEpisodeTriggered = true;
-                    triggerNextEpisode();
-                }
             } else {
                 throw new Error();
             }
@@ -132,42 +93,17 @@
     function startPolling() {
         if (pollingInterval) clearInterval(pollingInterval);
         failCount = 0;
-        nextEpisodeTriggered = false;
         pollingInterval = setInterval(pollMpcViaProxy, 2000);
         pollMpcViaProxy();
     }
 
-    // Примітка: раніше тут була активна перевірка готовності стріму через повторні
-    // fetch-запити (HEAD / Range GET) до URL стріму. Від неї відмовились: кожен такий
-    // запит відкриває нове з'єднання до торрент-стрім-сервера, а сервер трактує кожне
-    // нове з'єднання як нову сесію відтворення і скидає/перезапускає preload заново.
-    // Через це стрім ніколи не встигав "дозріти" - наші ж перевірки й заважали.
-    // Замість цього просто запускаємо MPC-BE напряму (як і при ручному відкритті URL,
-    // яке працює стабільно), з невеликою фіксованою паузою для проксі-сервера.
-
     function initExternalPlayer() {
+        // Підміняємо плеєр ТІЛЬКИ на Windows
         Lampa.Player.play = function (data) {
-            stopPolling();
-
+            stopPolling(); 
+            
             var videoUrl = data.url || data.file || "";
             if (!videoUrl) return;
-
-            console.log('[MPC-DEBUG] Оригінальний URL:', videoUrl);
-
-            // Прибираємо подвійне urlencoding (наприклад %2520 -> %20 -> пробіл),
-            // яке інакше псує посилання при передачі напряму в командний рядок MPC-BE.
-            try {
-                var decodedOnce = decodeURIComponent(videoUrl);
-                // Декодуємо ще раз лише якщо після першого декодування залишились
-                // "закодовані" послідовності виду %XX - ознака подвійного кодування.
-                if (/%[0-9A-Fa-f]{2}/.test(decodedOnce)) {
-                    videoUrl = decodedOnce;
-                }
-            } catch (e) {
-                console.log('[MPC-DEBUG] Помилка декодування URL:', e);
-            }
-
-            console.log('[MPC-DEBUG] URL після декодування:', videoUrl);
 
             currentTimeline = data.timeline;
             var targetTimeSec = (currentTimeline && currentTimeline.time) ? currentTimeline.time : 0;
@@ -176,28 +112,16 @@
                 proxyProcess = node_cp.spawn(NODE_EXE_PATH, [PROXY_SCRIPT_PATH], { detached: true, stdio: 'ignore' });
                 if (proxyProcess.unref) proxyProcess.unref();
 
-                setTimeout(function () {
+                setTimeout(function() {
                     var args = [videoUrl];
                     if (targetTimeSec > 5) {
-                        args.push('/start', String(targetTimeSec * 1000));
+                        args.push('/start', targetTimeSec * 1000);
                     }
-
-                    console.log('[MPC-DEBUG] Запуск MPC-BE:', MPC_PATH, 'з аргументами:', JSON.stringify(args));
-
                     var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
-
-                    playerProcess.on('error', function (err) {
-                        console.log('[MPC-DEBUG] Помилка запуску процесу MPC-BE:', err);
-                    });
-
-                    playerProcess.on('exit', function (code, signal) {
-                        console.log('[MPC-DEBUG] MPC-BE завершився з кодом:', code, 'сигнал:', signal);
-                    });
-
                     if (playerProcess.unref) playerProcess.unref();
 
                     setTimeout(startPolling, 2000);
-                }, PROXY_STARTUP_DELAY_MS);
+                }, 1000);
             } catch (err) {
                 stopPolling();
             }
