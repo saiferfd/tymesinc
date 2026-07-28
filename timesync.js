@@ -7,17 +7,9 @@
     var timeStalledCount = 0; 
     var nextEpisodeTriggered = false;
     var currentSelector = ''; 
-    var playbackStarted = false; // <-- НОВИЙ ПРАПОРЕЦЬ ЗАХИСТУ
+    var playbackStarted = false;
 
-    function updateLastTime() {
-        if (currentHash) {
-            var fileViews = Lampa.Storage.get('file_view', {});
-            var info = fileViews[currentHash];
-            lastSeenTime = (info && info.time) ? info.time : 0;
-        }
-    }
-
-    // 1. Ловимо клік по серії
+    // 1. Ловимо клік по серії (Онлайн або Торрент)
     $(document).on('click hover:enter', '.torrent-list > .online-prestige.selector, .torrent-files > .torrent-serial.selector, .torrent-files > .torrent-item.selector', function () {
         
         if ($(this).hasClass('online-prestige')) currentSelector = '.torrent-list > .online-prestige.selector';
@@ -29,12 +21,32 @@
         
         nextEpisodeTriggered = false;
         timeStalledCount = 0;
-        playbackStarted = false; // Блокуємо сканер до початку реального відтворення
+        playbackStarted = false;
 
-        var domHash = $(this).find('.time-line').attr('data-hash');
-        if (domHash) {
-            currentHash = domHash;
-            updateLastTime();
+        // Шукаємо хеш у DOM (для онлайну)
+        currentHash = $(this).find('.time-line').attr('data-hash') || null;
+
+        // Якщо в DOM хешу немає (торрент), пробуємо взяти останній активний з Лампи через невелику затримку
+        if (!currentHash) {
+            setTimeout(function() {
+                try {
+                    if (Lampa.Player && Lampa.Player.video && Lampa.Player.video.hash) {
+                        currentHash = Lampa.Player.video.hash;
+                    } else {
+                        // Резервний варіант: беремо останній змінений хеш з бази
+                        var fileViews = Lampa.Storage.get('file_view', {});
+                        var keys = Object.keys(fileViews);
+                        if (keys.length > 0) currentHash = keys[keys.length - 1];
+                    }
+                    var fileViews = Lampa.Storage.get('file_view', {});
+                    var info = fileViews[currentHash];
+                    lastSeenTime = (info && info.time) ? info.time : 0;
+                } catch(e) {}
+            }, 1000);
+        } else {
+            var fileViews = Lampa.Storage.get('file_view', {});
+            var info = fileViews[currentHash];
+            lastSeenTime = (info && info.time) ? info.time : 0;
         }
     });
 
@@ -48,7 +60,7 @@
             var $next = $allEpisodes.eq(nextIndex);
             currentEpisodeIndex = nextIndex;
             timeStalledCount = 0;
-            playbackStarted = false; // Блокуємо сканер для наступної серії
+            playbackStarted = false;
             
             var el = $next[0];
             if (el) el.dispatchEvent(new MouseEvent('click', { view: window, bubbles: true, cancelable: true }));
@@ -60,18 +72,7 @@
     }
 
     function initAutoNext() {
-        // 2. Перехоплюємо плеєр для торрентів
-        var originalPlay = Lampa.Player.play;
-        Lampa.Player.play = function (data) {
-            if (data && data.timeline && data.timeline.hash) {
-                currentHash = data.timeline.hash;
-                updateLastTime(); 
-                playbackStarted = false; // Скидаємо прапорець
-            }
-            if (originalPlay) originalPlay.apply(this, arguments);
-        };
-
-        // 3. Розумний сканер
+        // Сканер бази даних (не чіпає запуск, а тільки слідкує за таймкодом)
         setInterval(function() {
             if (!currentHash || nextEpisodeTriggered || currentEpisodeIndex === -1) return;
 
@@ -83,16 +84,13 @@
                 var percentWatched = currentTime / info.duration;
                 var timeLeft = info.duration - currentTime;
 
-                // --- ФІКС: Чекаємо, поки відео РЕАЛЬНО почне грати у цій сесії ---
                 if (!playbackStarted) {
-                    // Якщо час змінився відносно стартового - значить VLC запустився і передає дані
                     if (Math.abs(currentTime - lastSeenTime) >= 1) {
                         playbackStarted = true;
                         lastSeenTime = currentTime;
                     }
-                    return; // Далі не йдемо, сканер поки що "спить"
+                    return; 
                 }
-                // -----------------------------------------------------------------
 
                 if (Math.abs(currentTime - lastSeenTime) < 2) { 
                     timeStalledCount++; 
@@ -109,13 +107,11 @@
             }
         }, 2000);
 
-        console.log('Lampa Auto-Next: Універсальний сканер (Фікс переглянутих) активовано');
+        console.log('Lampa Auto-Next: Безпечний режим активовано');
     }
 
     if (window.appready) initAutoNext();
     else {
-        Lampa.Listener.follow('app', function (e) {
-            if (e.type == 'ready') initAutoNext();
-        });
+        Lampa.Listener.follow('app', function (e) { if (e.type == 'ready') initAutoNext(); });
     }
 })();
