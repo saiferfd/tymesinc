@@ -151,6 +151,7 @@
                     if (targetTimeSec > 5) {
                         args.push('/start', targetTimeSec * 1000);
                     }
+                    console.log('MPC ARGS:', JSON.stringify(args));
                     var playerProcess = node_cp.spawn(MPC_PATH, args, { detached: true, stdio: 'ignore' });
                     if (playerProcess.unref) playerProcess.unref();
 
