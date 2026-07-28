@@ -6,7 +6,7 @@
     var lastSeenTime = -1; 
     var timeStalledCount = 0; 
     var nextEpisodeTriggered = false;
-    var currentSelector = ''; 
+    var currentSelector = '';
     var playbackStarted = false;
 
     // 1. Ловимо клік по серії (Онлайн або Торрент)
@@ -23,31 +23,19 @@
         timeStalledCount = 0;
         playbackStarted = false;
 
-        // Шукаємо хеш у DOM (для онлайну)
-        currentHash = $(this).find('.time-line').attr('data-hash') || null;
-
-        // Якщо в DOM хешу немає (торрент), пробуємо взяти останній активний з Лампи через невелику затримку
-        if (!currentHash) {
-            setTimeout(function() {
-                try {
-                    if (Lampa.Player && Lampa.Player.video && Lampa.Player.video.hash) {
-                        currentHash = Lampa.Player.video.hash;
-                    } else {
-                        // Резервний варіант: беремо останній змінений хеш з бази
-                        var fileViews = Lampa.Storage.get('file_view', {});
-                        var keys = Object.keys(fileViews);
-                        if (keys.length > 0) currentHash = keys[keys.length - 1];
-                    }
-                    var fileViews = Lampa.Storage.get('file_view', {});
+        // Даємо Лампі чверть секунди на створення запису в базі і беремо актуальний останній хеш
+        setTimeout(function() {
+            try {
+                var fileViews = Lampa.Storage.get('file_view', {});
+                var keys = Object.keys(fileViews);
+                if (keys.length > 0) {
+                    // Беремо найсвіжіший запис із бази Лампи
+                    currentHash = keys[keys.length - 1];
                     var info = fileViews[currentHash];
                     lastSeenTime = (info && info.time) ? info.time : 0;
-                } catch(e) {}
-            }, 1000);
-        } else {
-            var fileViews = Lampa.Storage.get('file_view', {});
-            var info = fileViews[currentHash];
-            lastSeenTime = (info && info.time) ? info.time : 0;
-        }
+                }
+            } catch(e) {}
+        }, 300);
     });
 
     function playNextEpisode() {
@@ -71,47 +59,43 @@
         }
     }
 
-    function initAutoNext() {
-        // Сканер бази даних (не чіпає запуск, а тільки слідкує за таймкодом)
-        setInterval(function() {
-            if (!currentHash || nextEpisodeTriggered || currentEpisodeIndex === -1) return;
+    // 2. Фоновий сканер (стежить виключно за закінченням серії)
+    setInterval(function() {
+        if (!currentHash || nextEpisodeTriggered || currentEpisodeIndex === -1) return;
 
-            var fileViews = Lampa.Storage.get('file_view', {});
-            var info = fileViews[currentHash];
+        var fileViews = Lampa.Storage.get('file_view', {});
+        var info = fileViews[currentHash];
 
-            if (info && info.duration && info.duration > 60) {
-                var currentTime = info.time || 0;
-                var percentWatched = currentTime / info.duration;
-                var timeLeft = info.duration - currentTime;
+        if (info && info.duration && info.duration > 60) {
+            var currentTime = info.time || 0;
+            var percentWatched = currentTime / info.duration;
+            var timeLeft = info.duration - currentTime;
 
-                if (!playbackStarted) {
-                    if (Math.abs(currentTime - lastSeenTime) >= 1) {
-                        playbackStarted = true;
-                        lastSeenTime = currentTime;
-                    }
-                    return; 
-                }
-
-                if (Math.abs(currentTime - lastSeenTime) < 2) { 
-                    timeStalledCount++; 
-                } else {
-                    timeStalledCount = 0; 
+            // Захист від хибного спрацьовування на старті
+            if (!playbackStarted) {
+                if (Math.abs(currentTime - lastSeenTime) >= 1) {
+                    playbackStarted = true;
                     lastSeenTime = currentTime;
                 }
-
-                if (timeStalledCount >= 2 && (percentWatched > 0.85 || timeLeft <= 180)) {
-                    nextEpisodeTriggered = true;
-                    Lampa.Noty.show('Серія завершена. Запуск наступної...');
-                    playNextEpisode();
-                }
+                return; 
             }
-        }, 2000);
 
-        console.log('Lampa Auto-Next: Безпечний режим активовано');
-    }
+            // Перевіряємо, чи час зупинився (VLC закрився)
+            if (Math.abs(currentTime - lastSeenTime) < 2) { 
+                timeStalledCount++; 
+            } else {
+                timeStalledCount = 0; 
+                lastSeenTime = currentTime;
+            }
 
-    if (window.appready) initAutoNext();
-    else {
-        Lampa.Listener.follow('app', function (e) { if (e.type == 'ready') initAutoNext(); });
-    }
+            // Умова завершення серії
+            if (timeStalledCount >= 2 && (percentWatched > 0.85 || timeLeft <= 180)) {
+                nextEpisodeTriggered = true;
+                Lampa.Noty.show('Серія завершена. Запуск наступної...');
+                playNextEpisode();
+            }
+        }
+    }, 2000);
+
+    console.log('Lampa Auto-Next: Режим мʼякого читання бази активовано');
 })();
